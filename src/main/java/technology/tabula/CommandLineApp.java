@@ -160,10 +160,10 @@ public class CommandLineApp {
             pdfDocument = this.password == null ? PDDocument.load(pdfFile) : PDDocument.load(pdfFile, this.password);
             PageIterator pageIterator = getPageIterator(pdfDocument);
             List<Table> tables = new ArrayList<>();
-
+            int pageCount = 0;
             while (pageIterator.hasNext()) {
                 Page page = pageIterator.next();
-
+                pageCount++;
                 if (pageAreas != null) {
                     for (Pair<Integer, Rectangle> areaPair : pageAreas) {
                         Rectangle area = areaPair.getRight();
@@ -178,6 +178,7 @@ public class CommandLineApp {
                     tables.addAll(tableExtractor.extractTables(page));
                 }
             }
+            System.out.println("Total no. of pages: " + pageCount);
             writeTables(tables, outFile);
         } catch (IOException e) {
             throw new ParseException(e.getMessage());
@@ -424,6 +425,7 @@ public class CommandLineApp {
     }
 
     private void writeTables(List<Table> tables, Appendable out) throws IOException {
+        System.out.println("Number of tables: " + tables.size());
         Writer writer = null;
         switch (outputFormat) {
             case CSV:

@@ -6,15 +6,9 @@ import java.awt.image.BufferedImage;
 import java.awt.image.Raster;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.cos.COSName;
@@ -56,7 +50,7 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
     /**
      * Helper class that encapsulates a text edge
      */
-    private static final class TextEdge extends Line2D.Float {
+    private static final class TextEdge extends Line2D.Float implements Comparable<TextEdge> {
         // types of text edges
         public static final int LEFT = 0;
         public static final int MID = 1;
@@ -65,9 +59,33 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
 
         public int intersectingTextRowCount;
 
+        private TextChunk startTextChunk, endTextChunk;
+        private int edgeType;
+
         public TextEdge(float x1, float y1, float x2, float y2) {
             super(x1, y1, x2, y2);
             this.intersectingTextRowCount = 0;
+        }
+
+        public TextEdge(float x1, float y1, float x2, float y2, TextChunk startTextChunk, TextChunk endTextChunk, int edgeType) {
+            this(x1, y1, x2, y2);
+            this.startTextChunk = startTextChunk;
+            this.endTextChunk = endTextChunk;
+            this.edgeType = edgeType;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if(this == o) {
+                return true;
+            }
+            TextEdge otherEdge = (TextEdge) o;
+            return this.startTextChunk.equals(otherEdge.startTextChunk) && this.endTextChunk.equals(otherEdge.endTextChunk);
+        }
+
+        @Override
+        public int compareTo(TextEdge o) {
+            return java.lang.Float.compare(this.startTextChunk.getLeft(), o.startTextChunk.getLeft());
         }
     }
 
@@ -89,11 +107,23 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
     private static final class RelevantEdges {
         public int edgeType;
         public int edgeCount;
+        private List<TextEdge> edges;
 
         public RelevantEdges(int edgeType, int edgeCount) {
             this.edgeType = edgeType;
             this.edgeCount = edgeCount;
         }
+
+        public RelevantEdges(int edgeType, int edgeCount, List<TextEdge> edges) {
+            this(edgeType, edgeCount);
+            this.edges = edges;
+        }
+
+        public List<TextEdge> getRelevantEdges() {
+            return this.edges;
+        }
+
+        public int getRelevantEdgeCount() { return this.edges.size(); }
     }
 
     @Override
@@ -108,11 +138,12 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
         try {
             image = Utils.pageConvertToImage(pdfPage, 144, ImageType.GRAY);
         } catch (IOException e) {
+            System.err.println("Error converting to image: " + e.getMessage());
             return new ArrayList<>();
         }
 
         List<Ruling> horizontalRulings = this.getHorizontalRulings(image);
-
+        System.out.println("No. of horizontal rulings: " + horizontalRulings.size());
         // now check the page for vertical lines, but remove the text first to make things less confusing
         PDDocument removeTextDocument = null;
         try {
@@ -162,7 +193,8 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
             verticalRulings = Ruling.collapseOrientedRulings(verticalRulings, 5);
 
             // use the rulings and points to find cells
-            List<? extends Rectangle> cells = SpreadsheetExtractionAlgorithm.findCells(horizontalRulings, verticalRulings);
+            List<? extends Rectangle> cells = SpreadsheetExtractionAlgorithm.findCells(horizontalRulings,
+                    verticalRulings);
 
             // then use those cells to make table areas
             tableAreas = this.getTableAreasFromCells(cells);
@@ -279,7 +311,10 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
                         break;
                 }
 
-                Rectangle table = this.getTableFromText(lines, relevantEdges, relevantEdgeInfo.edgeCount, horizontalRulings);
+                Rectangle table = this.getTableFromText(lines,
+                        relevantEdgeInfo.getRelevantEdges(),
+                        relevantEdgeInfo.getRelevantEdgeCount(),
+                        horizontalRulings);
 
                 if (table != null) {
                     foundTable = true;
@@ -460,24 +495,48 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
         return table;
     }
 
+    private void addTextEdgeToCache(int i,
+                                    int edgeType,
+                                    TextEdge edge,
+                                    Map<Integer, Map<Integer, List<TextEdge>>> edgeCache) {
+        if (!edgeCache.containsKey(i)) {
+            edgeCache.put(i, new HashMap<>());
+        }
+        Map<Integer, List<TextEdge>> edgeListMap = edgeCache.get(i);
+        if (!edgeListMap.containsKey(edgeType)) {
+            edgeListMap.put(edgeType, new ArrayList<>());
+        }
+        List<TextEdge> list = edgeListMap.get(edgeType);
+        list.add(edge);
+    }
+
     private RelevantEdges getRelevantEdges(TextEdges textEdges, List<Line> lines) {
         List<TextEdge> leftTextEdges = textEdges.get(TextEdge.LEFT);
         List<TextEdge> midTextEdges = textEdges.get(TextEdge.MID);
         List<TextEdge> rightTextEdges = textEdges.get(TextEdge.RIGHT);
 
+        List<TextEdge> relevantEdges = new ArrayList<>();
+        Map<Integer, Map<Integer, List<TextEdge>>> edgeCache = new HashMap<>();
+
         // first we'll find the number of lines each type of edge crosses
         int[][] edgeCountsPerLine = new int[lines.size()][TextEdge.NUM_TYPES];
 
         for (TextEdge edge : leftTextEdges) {
-            edgeCountsPerLine[edge.intersectingTextRowCount - 1][TextEdge.LEFT]++;
+            int i = edge.intersectingTextRowCount - 1;
+            edgeCountsPerLine[i][TextEdge.LEFT]++;
+            addTextEdgeToCache(i, TextEdge.LEFT, edge, edgeCache);
         }
 
         for (TextEdge edge : midTextEdges) {
-            edgeCountsPerLine[edge.intersectingTextRowCount - 1][TextEdge.MID]++;
+            int i = edge.intersectingTextRowCount - 1;
+            edgeCountsPerLine[i][TextEdge.MID]++;
+            addTextEdgeToCache(i, TextEdge.MID, edge, edgeCache);
         }
 
         for (TextEdge edge : rightTextEdges) {
-            edgeCountsPerLine[edge.intersectingTextRowCount - 1][TextEdge.RIGHT]++;
+            int i = edge.intersectingTextRowCount - 1;
+            edgeCountsPerLine[i][TextEdge.RIGHT]++;
+            addTextEdgeToCache(i, TextEdge.RIGHT, edge, edgeCache);
         }
 
         // now let's find the relevant edge type and the number of those edges we should look for
@@ -485,32 +544,59 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
         int relevantEdgeType = -1;
         int relevantEdgeCount = 0;
         for (int i = edgeCountsPerLine.length - 1; i > 2; i--) {
-            if (edgeCountsPerLine[i][TextEdge.LEFT] > 2 &&
-                    edgeCountsPerLine[i][TextEdge.LEFT] >= edgeCountsPerLine[i][TextEdge.RIGHT] &&
-                    edgeCountsPerLine[i][TextEdge.LEFT] >= edgeCountsPerLine[i][TextEdge.MID]) {
-                relevantEdgeCount = edgeCountsPerLine[i][TextEdge.LEFT];
+            int leftEdgeCountsPerLine = edgeCountsPerLine[i][TextEdge.LEFT];
+            int rightEdgeCountsPerLine = edgeCountsPerLine[i][TextEdge.RIGHT];
+            int midEdgeCountsPerLine = edgeCountsPerLine[i][TextEdge.MID];
+//            if (leftEdgeCountsPerLine > 2 &&
+//                    leftEdgeCountsPerLine >= rightEdgeCountsPerLine &&
+//                    leftEdgeCountsPerLine >= midEdgeCountsPerLine) {
+//                relevantEdgeCount = leftEdgeCountsPerLine;
+//                relevantEdgeType = TextEdge.LEFT;
+//                relevantEdges.addAll(edgeCache.get(i).get(TextEdge.LEFT));
+//                break;
+//            }
+//
+//            if (rightEdgeCountsPerLine > 1 &&
+//                    rightEdgeCountsPerLine >= leftEdgeCountsPerLine &&
+//                    rightEdgeCountsPerLine >= midEdgeCountsPerLine) {
+//                relevantEdgeCount = rightEdgeCountsPerLine;
+//                relevantEdgeType = TextEdge.RIGHT;
+//                relevantEdges.addAll(edgeCache.get(i).get(TextEdge.RIGHT));
+//                break;
+//            }
+//
+//            if (midEdgeCountsPerLine > 1 &&
+//                    midEdgeCountsPerLine >= rightEdgeCountsPerLine &&
+//                    midEdgeCountsPerLine >= leftEdgeCountsPerLine) {
+//                relevantEdgeCount = midEdgeCountsPerLine;
+//                relevantEdgeType = TextEdge.MID;
+//                relevantEdges.addAll(edgeCache.get(i).get(TextEdge.MID));
+//                break;
+//            }
+
+            relevantEdgeCount = leftEdgeCountsPerLine + midEdgeCountsPerLine + rightEdgeCountsPerLine;
+
+            if (relevantEdgeCount >= 2) {
+                if (leftEdgeCountsPerLine > 0)
+                    relevantEdges.addAll(edgeCache.get(i).get(TextEdge.LEFT));
+                if (midEdgeCountsPerLine > 0)
+                    relevantEdges.addAll(edgeCache.get(i).get(TextEdge.MID));
+                if(rightEdgeCountsPerLine > 0)
+                    relevantEdges.addAll(edgeCache.get(i).get(TextEdge.RIGHT));
                 relevantEdgeType = TextEdge.LEFT;
-                break;
-            }
-
-            if (edgeCountsPerLine[i][TextEdge.RIGHT] > 1 &&
-                    edgeCountsPerLine[i][TextEdge.RIGHT] >= edgeCountsPerLine[i][TextEdge.LEFT] &&
-                    edgeCountsPerLine[i][TextEdge.RIGHT] >= edgeCountsPerLine[i][TextEdge.MID]) {
-                relevantEdgeCount = edgeCountsPerLine[i][TextEdge.RIGHT];
-                relevantEdgeType = TextEdge.RIGHT;
-                break;
-            }
-
-            if (edgeCountsPerLine[i][TextEdge.MID] > 1 &&
-                    edgeCountsPerLine[i][TextEdge.MID] >= edgeCountsPerLine[i][TextEdge.RIGHT] &&
-                    edgeCountsPerLine[i][TextEdge.MID] >= edgeCountsPerLine[i][TextEdge.LEFT]) {
-                relevantEdgeCount = edgeCountsPerLine[i][TextEdge.MID];
-                relevantEdgeType = TextEdge.MID;
                 break;
             }
         }
 
-        return new RelevantEdges(relevantEdgeType, relevantEdgeCount);
+        Collections.shuffle(relevantEdges, new Random(42));
+        List<TextEdge> cleanList = removeDuplicatesAndSort(relevantEdges);
+
+//        return new RelevantEdges(relevantEdgeType, relevantEdgeCount, relevantEdges);
+        return new RelevantEdges(relevantEdgeType, relevantEdgeCount, cleanList);
+    }
+
+    private List<TextEdge> removeDuplicatesAndSort(List<TextEdge> listToSort) {
+        return listToSort.stream().sorted().collect(Collectors.toList());
     }
 
     private TextEdges getTextEdges(List<Line> lines) {
@@ -554,7 +640,8 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
                 rightEdge.add(text);
 
                 // now see if this text chunk blows up any other edges
-                for (Iterator<Map.Entry<Integer, List<TextChunk>>> iterator = currLeftEdges.entrySet().iterator(); iterator.hasNext(); ) {
+                for (Iterator<Map.Entry<Integer, List<TextChunk>>> iterator = currLeftEdges.entrySet()
+                        .iterator(); iterator.hasNext(); ) {
                     Map.Entry<Integer, List<TextChunk>> entry = iterator.next();
                     Integer key = entry.getKey();
                     if (key > left && key < right) {
@@ -564,7 +651,7 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
                             TextChunk first = edgeChunks.get(0);
                             TextChunk last = edgeChunks.get(edgeChunks.size() - 1);
 
-                            TextEdge edge = new TextEdge(key, first.getTop(), key, last.getBottom());
+                            TextEdge edge = new TextEdge(first.getLeft(), first.getTop(), last.getLeft(), last.getBottom(), first, last, TextEdge.LEFT);
                             edge.intersectingTextRowCount = Math.min(edgeChunks.size(), lines.size());
 
                             leftTextEdges.add(edge);
@@ -572,7 +659,8 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
                     }
                 }
 
-                for (Iterator<Map.Entry<Integer, List<TextChunk>>> iterator = currMidEdges.entrySet().iterator(); iterator.hasNext(); ) {
+                for (Iterator<Map.Entry<Integer, List<TextChunk>>> iterator = currMidEdges.entrySet()
+                        .iterator(); iterator.hasNext(); ) {
                     Map.Entry<Integer, List<TextChunk>> entry = iterator.next();
                     Integer key = entry.getKey();
                     if (key > left && key < right && Math.abs(key - mid) > 2) {
@@ -582,7 +670,7 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
                             TextChunk first = edgeChunks.get(0);
                             TextChunk last = edgeChunks.get(edgeChunks.size() - 1);
 
-                            TextEdge edge = new TextEdge(key, first.getTop(), key, last.getBottom());
+                            TextEdge edge = new TextEdge(first.getLeft(), first.getTop(), last.getLeft(), last.getBottom(), first, last, TextEdge.MID);
                             edge.intersectingTextRowCount = Math.min(edgeChunks.size(), lines.size());
 
                             midTextEdges.add(edge);
@@ -590,7 +678,8 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
                     }
                 }
 
-                for (Iterator<Map.Entry<Integer, List<TextChunk>>> iterator = currRightEdges.entrySet().iterator(); iterator.hasNext(); ) {
+                for (Iterator<Map.Entry<Integer, List<TextChunk>>> iterator = currRightEdges.entrySet()
+                        .iterator(); iterator.hasNext(); ) {
                     Map.Entry<Integer, List<TextChunk>> entry = iterator.next();
                     Integer key = entry.getKey();
                     if (key > left && key < right) {
@@ -600,7 +689,7 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
                             TextChunk first = edgeChunks.get(0);
                             TextChunk last = edgeChunks.get(edgeChunks.size() - 1);
 
-                            TextEdge edge = new TextEdge(key, first.getTop(), key, last.getBottom());
+                            TextEdge edge = new TextEdge(first.getLeft(), first.getTop(), last.getLeft(), last.getBottom(), first, last, TextEdge.RIGHT);
                             edge.intersectingTextRowCount = Math.min(edgeChunks.size(), lines.size());
 
                             rightTextEdges.add(edge);
@@ -617,7 +706,7 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
                 TextChunk first = edgeChunks.get(0);
                 TextChunk last = edgeChunks.get(edgeChunks.size() - 1);
 
-                TextEdge edge = new TextEdge(key, first.getTop(), key, last.getBottom());
+                TextEdge edge = new TextEdge(first.getLeft(), first.getTop(), last.getLeft(), last.getBottom(), first, last, TextEdge.LEFT);
                 edge.intersectingTextRowCount = Math.min(edgeChunks.size(), lines.size());
 
                 leftTextEdges.add(edge);
@@ -630,7 +719,7 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
                 TextChunk first = edgeChunks.get(0);
                 TextChunk last = edgeChunks.get(edgeChunks.size() - 1);
 
-                TextEdge edge = new TextEdge(key, first.getTop(), key, last.getBottom());
+                TextEdge edge = new TextEdge(first.getLeft(), first.getTop(), last.getLeft(), last.getBottom(), first, last, TextEdge.MID);
                 edge.intersectingTextRowCount = Math.min(edgeChunks.size(), lines.size());
 
                 midTextEdges.add(edge);
@@ -643,7 +732,7 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
                 TextChunk first = edgeChunks.get(0);
                 TextChunk last = edgeChunks.get(edgeChunks.size() - 1);
 
-                TextEdge edge = new TextEdge(key, first.getTop(), key, last.getBottom());
+                TextEdge edge = new TextEdge(first.getLeft(), first.getTop(), last.getLeft(), last.getBottom(), first, last, TextEdge.RIGHT);
                 edge.intersectingTextRowCount = Math.min(edgeChunks.size(), lines.size());
 
                 rightTextEdges.add(edge);
