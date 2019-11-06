@@ -88,6 +88,26 @@ Clone this repo and run:
 
 ```
 mvn clean compile assembly:single
+
+```
+
+## Using the jar file from Python
+After compiling the source code (as described in the previous section),  the compiled jar file `tabula-x.x.x-SNAPSHOT-jar-with-dependencies.jar` can be found in the `target` directory. 
+
+Next, install `tabula-py` package using `pip` or `conda`. To configure `tabula-py` to use a custom jar file, export `TABULA_JAR` environment variable to point to the jar file location.
+
+```
+import os
+os.environ['TABULA_JAR'] = <path_to_the_jar_file>
+import tabula
+```
+
+Now, to extract tables from pdf tables into a CSV file
+
+*Please note* - Using the api `tabula.read_pdf` to convert tables into a dataframe isn't producing accurate results. We suggest to convert them to CSV and process it for better accuracy.
+
+```
+tabula.convert_into("test.pdf", "output.csv", output_format="csv", pages='all')
 ```
 
 ## Contributing
